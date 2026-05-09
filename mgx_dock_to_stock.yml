@@ -1,0 +1,107 @@
+# .github/workflows/mgx_dock_to_stock.yml
+#
+# MGX Dock to Stock — Automated Report Pipeline
+# ================================================
+# Schedule: Every Monday at 6:00 AM CST (12:00 UTC)
+# Manual:   Can also be triggered from the Actions tab
+#
+# What it does:
+#   1. Connects to Oracle DB
+#   2. Runs the Dock to Stock query for the previous week
+#   3. Exports results to Excel
+#   4. Uploads / appends to SharePoint master file
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#   ORACLE_USERNAME
+#   ORACLE_PASSWORD
+#   ORACLE_DSN              e.g. myhost.example.com:1521/ORCLPDB
+#   ORACLE_INVENTORY_ORG    e.g. 1013
+#   AZURE_TENANT_ID
+#   AZURE_CLIENT_ID
+#   AZURE_CLIENT_SECRET
+#   SHAREPOINT_SITE_ID
+#   SHAREPOINT_DRIVE_ID
+#   SHAREPOINT_FILE_PATH    e.g. /MGX Dock to Stock/MGX Dock to Stock Master.xlsx
+
+name: MGX Dock to Stock Report
+
+on:
+  schedule:
+    - cron: "0 12 * * 1"   # Every Monday 12:00 UTC = 6:00 AM CST
+  workflow_dispatch:         # Allows manual run from Actions tab
+    inputs:
+      date_from:
+        description: "Receipt date from (YYYY-MM-DD). Leave blank for auto last week."
+        required: false
+      date_to:
+        description: "Receipt date to (YYYY-MM-DD). Leave blank for auto last week."
+        required: false
+      organization:
+        description: "Inventory org code override (optional)"
+        required: false
+
+jobs:
+  run-report:
+    name: Run & Upload Dock to Stock Report
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout repo ────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. Install dependencies ─────────────────────────────────────
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── 4. Install Oracle Instant Client ────────────────────────────
+      - name: Install Oracle Instant Client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libaio1
+          wget -q https://download.oracle.com/otn_software/linux/instantclient/2112000/instantclient-basiclite-linux.x64-21.12.0.0.0dbru.zip
+          unzip -q instantclient-basiclite-linux.x64-21.12.0.0.0dbru.zip -d /opt/oracle
+          echo "/opt/oracle/instantclient_21_12" | sudo tee /etc/ld.so.conf.d/oracle.conf
+          sudo ldconfig
+
+      # ── 5. Run report pipeline ──────────────────────────────────────
+      - name: Run Dock to Stock pipeline
+        env:
+          ORACLE_USERNAME:       ${{ secrets.ORACLE_USERNAME }}
+          ORACLE_PASSWORD:       ${{ secrets.ORACLE_PASSWORD }}
+          ORACLE_DSN:            ${{ secrets.ORACLE_DSN }}
+          ORACLE_INVENTORY_ORG:  ${{ secrets.ORACLE_INVENTORY_ORG }}
+          AZURE_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          SHAREPOINT_SITE_ID:    ${{ secrets.SHAREPOINT_SITE_ID }}
+          SHAREPOINT_DRIVE_ID:   ${{ secrets.SHAREPOINT_DRIVE_ID }}
+          SHAREPOINT_FILE_PATH:  ${{ secrets.SHAREPOINT_FILE_PATH }}
+          # Manual override inputs (only set when workflow_dispatch is used)
+          INPUT_DATE_FROM:       ${{ github.event.inputs.date_from }}
+          INPUT_DATE_TO:         ${{ github.event.inputs.date_to }}
+          INPUT_ORGANIZATION:    ${{ github.event.inputs.organization }}
+        run: python pipeline.py
+
+      # ── 6. Upload Excel as workflow artifact (30-day retention) ─────
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dock-to-stock-${{ github.run_id }}
+          path: output/*.xlsx
+          retention-days: 30
+
+      # ── 7. Notify on failure ─────────────────────────────────────────
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::MGX Dock to Stock pipeline failed. Check logs above."
+          # Optional: add a curl call here to post to Teams/Slack webhook
